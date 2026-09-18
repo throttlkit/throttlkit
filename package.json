@@ -1,6 +1,6 @@
 {
   "name": "throttlkit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "In-process and PostgreSQL-backed rate limiting for Node.js",
   "license": "MIT",
   "repository": {
@@ -9,7 +9,13 @@
   },
   "bugs": "https://github.com/throttlkit/throttlkit/issues",
   "homepage": "https://github.com/throttlkit/throttlkit#readme",
-  "keywords": ["rate-limit", "throttle", "sliding-window", "token-bucket", "postgresql"],
+  "keywords": [
+    "rate-limit",
+    "throttle",
+    "sliding-window",
+    "token-bucket",
+    "postgresql"
+  ],
   "type": "module",
   "main": "./src/index.js",
   "types": "./src/index.d.ts",
@@ -19,15 +25,27 @@
       "default": "./src/index.js"
     }
   },
-  "files": ["src/", "README.md", "BENCHMARK.md", "benchmark.js", "LICENSE"],
+  "files": [
+    "src/",
+    "README.md",
+    "BENCHMARK.md",
+    "benchmark.js",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test test/throttle.test.js test/express.test.js",
     "benchmark": "node --expose-gc benchmark.js",
     "test:types": "tsc --noEmit --project test/tsconfig.json",
     "test:integration": "node --test test/postgres.test.js"
   },
-  "peerDependencies": { "pg": "^8.0.0" },
-  "peerDependenciesMeta": { "pg": { "optional": true } },
+  "peerDependencies": {
+    "pg": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/pg": "^8.23.1",
@@ -36,5 +54,7 @@
     "supertest": "^7.1.4",
     "typescript": "^5.9.3"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22"
+  }
 }
