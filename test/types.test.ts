@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import type { Request, Response, NextFunction } from 'express';
-import throttl, { postgresStore, type ThrottlDecision } from 'throttlkit';
+import throttl, { postgresStore, type ThrottlDecision } from 'throttlflow';
 
 const local = throttl({ limit: 10, windowMs: 60_000 });
 const localDecision: Promise<ThrottlDecision> = local.check('customer-1');

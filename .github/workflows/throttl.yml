@@ -1,4 +1,4 @@
-name: Throttl package
+name: ThrottlFlow package
 
 on:
   push:
@@ -65,7 +65,7 @@ jobs:
       - name: Verify the published import in a separate consumer
         run: |
           tarball=$(npm pack --pack-destination "$RUNNER_TEMP" --silent)
-          mkdir "$RUNNER_TEMP/throttlkit-consumer"
-          npm install --prefix "$RUNNER_TEMP/throttlkit-consumer" "$RUNNER_TEMP/$tarball" --ignore-scripts --no-audit
-          cd "$RUNNER_TEMP/throttlkit-consumer"
-          node --input-type=module -e "import throttl from 'throttlkit'; const limiter = throttl({limit: 1, windowMs: 60000}); if (!(await limiter.check('user')).allowed || (await limiter.check('user')).allowed) process.exit(1)"
+          mkdir "$RUNNER_TEMP/throttlflow-consumer"
+          npm install --prefix "$RUNNER_TEMP/throttlflow-consumer" "$RUNNER_TEMP/$tarball" --ignore-scripts --no-audit
+          cd "$RUNNER_TEMP/throttlflow-consumer"
+          node --input-type=module -e "import throttl from 'throttlflow'; const limiter = throttl({limit: 1, windowMs: 60000}); if (!(await limiter.check('user')).allowed || (await limiter.check('user')).allowed) process.exit(1)"

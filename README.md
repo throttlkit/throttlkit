@@ -1,15 +1,15 @@
-# Throttl
+# ThrottlFlow
 
-Throttl is a Node.js rate limiter with exact sliding-window and token-bucket algorithms. It runs inside your application. Use the default bounded memory store for one process, or supply the PostgreSQL store when multiple processes must share limits. Node.js 22 or newer and ES modules are supported.
+ThrottlFlow is a Node.js rate limiter with exact sliding-window and token-bucket algorithms. It runs inside your application. Use the default bounded memory store for one process, or supply the PostgreSQL store when multiple processes must share limits. Node.js 22 or newer and ES modules are supported.
 
 ## Install and use
 
 ```sh
-npm install throttlkit
+npm install throttlflow
 ```
 
 ```js
-import throttl from 'throttlkit';
+import throttl from 'throttlflow';
 
 const limiter = throttl({ limit: 10, windowMs: 60_000 });
 const result = await limiter.check('user-123');
@@ -27,7 +27,7 @@ The default sliding window permits at most `limit` checks for each key in any ro
 
 ```js
 import express from 'express';
-import throttl from 'throttlkit';
+import throttl from 'throttlflow';
 
 const app = express();
 const limiter = throttl({ limit: 5, windowMs: 60_000 });
@@ -62,7 +62,7 @@ Install `pg` in your application and provide a pool:
 
 ```js
 import pg from 'pg';
-import throttl, { postgresStore } from 'throttlkit';
+import throttl, { postgresStore } from 'throttlflow';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -78,7 +78,7 @@ const limiter = throttl({ limit: 5, windowMs: 60_000, store });
 const result = await limiter.check('user-123');
 ```
 
-Give each policy a unique, stable `namespace`. If you change its algorithm or values, use a new namespace (for example, `login-v2`) or reset old state before using the new configuration. Throttl rejects a changed configuration for an existing namespace/key instead of silently mixing state. Store the pool in your application and close it during shutdown; Throttl does not own it. Configure the pool's connection timeout; the store applies a transaction-local statement timeout (5 seconds by default) so a blocked SQL statement fails closed rather than waiting indefinitely.
+Give each policy a unique, stable `namespace`. If you change its algorithm or values, use a new namespace (for example, `login-v2`) or reset old state before using the new configuration. ThrottlFlow rejects a changed configuration for an existing namespace/key instead of silently mixing state. Store the pool in your application and close it during shutdown; ThrottlFlow does not own it. Configure the pool's connection timeout; the store applies a transaction-local statement timeout (5 seconds by default) so a blocked SQL statement fails closed rather than waiting indefinitely.
 
 The store hashes subject keys with SHA-256 before writing them. A PostgreSQL transaction creates or locates that subject's row, locks it with `FOR UPDATE`, uses the database clock, updates algorithm state, and commits. Separate application instances therefore share one decision history for each namespace/key. Unrelated keys can proceed concurrently. Exact sliding windows write one event row per accepted check, so very hot keys are more expensive than token buckets; benchmark your own database before setting high limits.
 
@@ -98,4 +98,4 @@ From the repository root, run `npm test`, `npm run test:types`, and `npm pack --
 
 `npm run benchmark` measures in-process checks on your machine. See [BENCHMARK.md](BENCHMARK.md) in the repository for methodology. That benchmark is not a server or PostgreSQL throughput guarantee.
 
-Throttl is licensed under [MIT](LICENSE).
+ThrottlFlow is licensed under [MIT](LICENSE).
