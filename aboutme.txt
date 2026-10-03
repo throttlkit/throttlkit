@@ -1,0 +1,337 @@
+THROTTLFLOW 0.2.0 — PROJECT EXPLANATION
+Prepared as an npm library upgrade; publication is a separate step.
+
+WHAT I BUILT
+
+ThrottlFlow is a JavaScript rate-limiting package. Applications import it and ask
+whether a user, tenant, API key or other trusted subject may start an operation.
+It returns the decision, remaining quota and retry information. It can protect
+login attempts, public APIs, expensive AI calls, verification messages and jobs.
+
+The earlier Throttle project was a full application with a dashboard and a
+backend. A standalone dashboard was harder for developers to integrate directly
+into their projects. The npm package moves the reusable decision logic into the
+application that needs it. Developers install a dependency and call its API or
+middleware instead of relying on a separate Throttle-hosted website.
+
+The author does not run a required backend for this package. Users provide their
+own Node application and, when needed, their own Redis or PostgreSQL services.
+There is no mandatory account, hosted ThrottlFlow endpoint or author-issued key.
+
+TECHNOLOGY AND WHY IT IS USED
+
+JavaScript implements runtime behaviour. TypeScript declarations describe the
+public API without requiring users to compile the package. Node.js 22+ is the
+supported server runtime. SQL defines persistent shared state in PostgreSQL.
+Lua performs atomic decisions on Redis. esbuild produces distribution files.
+npm handles installation, scripts, packing and publication. The Node test runner
+and strict assertions validate behaviour. Express, Fastify and Koa are used for
+framework tests. Supertest verifies HTTP responses. PGlite runs embedded
+PostgreSQL SQL/migration tests. Fengari runs the actual Redis script against a
+deterministic command model. GitHub Actions runs native database tests across
+Node 22, 24 and 26. The package uses the MIT license.
+
+Runtime database clients and frameworks belong to the consuming application.
+Development dependencies used in tests are not all installed into consumer apps.
+
+HOW ONE REQUEST WORKS
+
+1. The user's application authenticates a caller.
+2. It selects a subject key and an integer operation cost.
+3. It calls limiter.check(key, { cost }).
+4. The factory validates the input and starts optional timeout/abort handling.
+5. The chosen store reads that subject's current policy state atomically.
+6. The algorithm accounts for elapsed time, expired events or replenished units.
+7. The store consumes capacity only if the operation is allowed.
+8. A decision returns with allowed, limit, remaining, resetAt and retryAfterMs.
+9. Local counters and observer hooks report the outcome.
+10. An HTTP adapter forwards accepted traffic or returns a quota/error response.
+
+The application performs its expensive work after permission is granted.
+Denied checks do not consume quota. Accepted attempts remain charged even if the
+application work later fails. This version has no reservations or refunds.
+
+CODE MAP
+
+src/index.js exports the main Node API, including database adapters.
+src/core.js exports a portable API excluding Node database adapters.
+src/factory.js validates configuration, builds the limiter, chooses a store,
+  executes weighted checks, maintains counters and invokes isolated hooks.
+src/algorithms.js calculates token-bucket, GCRA and sliding-counter state,
+  constructs decisions and defines the quota configuration signature.
+src/memory.js maintains bounded Map state, exact event arrays and expiration.
+src/redis.js contains atomic Lua, Redis time, SHA-256 key names, cluster hash
+  tags, EVALSHA caching, TTLs and client/executor compatibility.
+src/postgres.js manages transactions, row locks, policy validation, migrations,
+  live-event counting, scalar updates and bounded cleanup.
+src/schema.js embeds the same SQL that appears in migration files.
+src/control.js bounds caller waiting and cleans timers/abort listeners.
+src/adapters.js implements Express, Fastify, Koa, Fetch/Next.js, Hapi and Nest
+  integration, headers and explicit store-failure policies.
+src/policies.js provides scoped keys, dynamic plan resolution, composed limits
+  and a process-local storage circuit breaker.
+src/errors.js separates capacity, configuration, storage and timeout failures.
+src/index.d.ts describes the public API for TypeScript.
+scripts/build.js validates SQL parity and builds ESM/CommonJS distributions,
+  declarations and source maps.
+migrations/001-initial.sql creates the original schema.
+migrations/002-weighted-algorithms.sql upgrades it for costs and new algorithms.
+examples/ demonstrates HTTP use, Redis, PostgreSQL and scheduled cleanup.
+test/ validates quotas, errors, storage contracts, adapters and distribution.
+GUIDE.md gives the complete API, deployment rules and remaining trade-offs.
+README.md gives the shorter installation and usage reference.
+RELEASING.md describes verification and publication.
+CHANGELOG.md records the upgrade.
+
+THE FOUR ALGORITHMS
+
+Exact sliding window:
+  A rolling limit counts accepted units with timestamps inside the last window.
+  A timestamp exactly at the cutoff expires. One weighted event represents one
+  accepted check. Denials do not create events. A large cost may require several
+  earlier events to expire, so retryAfterMs waits for enough combined units.
+  Good for security-sensitive actions where strict rolling counts matter.
+  Default ceiling is 10,000 units per configured window; it is configurable.
+  Event history costs memory and database writes.
+
+Token bucket:
+  Starts with a full balance, spends the operation cost and replenishes over
+  time, including fractional tokens. Capacity limits the immediate burst.
+  The refill settings limit the sustained average rate. A denied operation gets
+  the wait until enough tokens exist for its cost. State is constant in size.
+  Good for public APIs and expensive operations that tolerate controlled bursts.
+  Capacity 100 plus refill 100/minute is not an exact rolling 100/minute cap.
+
+GCRA:
+  Tracks one theoretical arrival timestamp. An accepted cost advances that
+  timestamp by cost times the permitted interval. The burst option permits
+  limited immediate work; afterward checks must wait for schedule recovery.
+  Good for smooth request pacing. A burst of one defaults to no multi-unit
+  immediate burst. The decision limit describes burst capacity.
+  Integer microseconds preserve burst counts at modern Unix timestamps.
+  Pacing intervals round upward conservatively; configurations faster than
+  one unit per microsecond are rejected. This is not a throughput guarantee.
+
+Approximate sliding-window counter:
+  Stores the current fixed bucket and the previous bucket's count. It weights
+  the previous count according to how much of the current window remains.
+  It uses bounded state but cannot reconstruct individual arrival times.
+  It can overestimate or underestimate real rolling usage when traffic bursts.
+  Good when approximation is acceptable and event storage is too expensive.
+
+STORAGE OPTIONS
+
+Memory:
+  The default store belongs to one limiter/store object in one process.
+  It does not survive restarts or share quotas across servers/workers.
+  Defaults are 100,000 active keys and 1,000,000 retained exact events.
+  Expired data is swept when capacity is needed or cleanup is called.
+  Active subjects are never silently evicted because eviction would reopen
+  their quotas. Exceeding bounds raises a capacity error.
+  A backward clock is clamped to preserve consumed capacity.
+
+Redis:
+  The consuming app supplies node-redis, ioredis or a compatible execute callback.
+  Every check runs read/expiration/decision/write in one atomic Lua script.
+  Redis time avoids disagreement between application servers' clocks.
+  Related structures share a cluster hash tag. Scalar algorithms use a hash;
+  exact windows also use a timestamp-sorted set containing accepted costs.
+  SHA-256 keeps raw subject identifiers out of stored keys. It is not encryption.
+  TTL expiration releases idle state automatically; cleanup returns zero.
+  EVALSHA reduces script-transfer overhead. Only a NOSCRIPT error causes EVAL
+  fallback. Network errors are not automatically retried because a check may
+  already have consumed quota before the connection failed.
+  Users manage durability, no-eviction configuration, credentials and shutdown.
+
+PostgreSQL:
+  The app supplies a pg-compatible pool and a stable policy namespace.
+  throttl_keys stores one policy row per namespace and hashed subject.
+  throttl_window_events stores accepted exact-window event times and costs.
+  An exact check counts only events newer than the window cutoff.
+  Scalar algorithms update one state row instead of creating request events.
+  Configuration hashes prevent silently mixing two policies for the same key.
+  Cleanup deletes expired subjects in batches and prunes stale exact events
+  under the same subject locks. Users schedule cleanup and size their pool.
+
+CONCURRENCY: THE IMPORTANT PROBLEM
+
+Suppose one unit remains. Request A reads one and Request B also reads one.
+Without atomic coordination, both can allow themselves and write zero. Two
+operations then pass through a quota that should have admitted one.
+
+Memory checks finish synchronously before another JavaScript callback changes
+the same Map state. This only coordinates callers sharing that process/store.
+Redis runs the whole Lua decision atomically without interleaved commands.
+PostgreSQL locks the subject row with SELECT ... FOR UPDATE inside a transaction.
+Another transaction for the same subject waits and then reads committed state.
+Different subjects can proceed concurrently. A transaction alone is insufficient
+if simultaneous transactions both read the previous state without a row lock.
+
+The trade-off is that an extremely hot subject serializes on its row or shard.
+It is better suited to Redis and scalar algorithms when throughput matters.
+
+HTTP INTEGRATION
+
+Express middleware forwards allowed requests through next(). Denials return
+429 RATE_LIMITED with retry information. Storage/capacity failures return
+503 RATE_LIMIT_UNAVAILABLE by default. Configuration and programming errors
+go to application error handling. Other adapters follow the same policy.
+
+Fastify uses an async hook. Koa uses middleware. Fetch/Next.js wraps a Request/
+Response handler and preserves route context. Hapi uses lifecycle hooks. Nest
+uses an HTTP guard plus an application-supplied exception factory.
+
+Identity/cost functions may be asynchronous. Authentication must run first.
+An explicit onStoreError setting can allow traffic during outages. This increases
+availability but intentionally weakens enforcement. A callback can decide per
+request. Default behaviour remains deny.
+
+Header choices are legacy, ratelimit, both or false. Legacy X-RateLimit headers
+remain supported. The RateLimit-Limit/Remaining/Reset fields follow a draft-style
+convention, not a universal finalized-standard claim. Retry-After remains on
+denials even when other headers are disabled.
+
+WEIGHTED COSTS
+
+limiter.check('user', { cost: 10 }) consumes ten units for an expensive action.
+The cost must be a positive safe integer within policy capacity. All built-in
+stores support it. Custom stores must explicitly advertise supportsCost: true,
+so an older store cannot silently ignore a weighted operation.
+
+DYNAMIC PLANS AND COMBINED QUOTAS
+
+dynamicLimiter resolves a trusted plan to { id, key, options }. It caches a
+bounded number of policy versions. Free and pro users can receive different
+limits. A policy ID must keep its quota settings stable; changes need a new
+version. Policy IDs and plan choice must come from trusted application data.
+The cache keeps the first limiter's store/operational settings for that ID.
+
+composeLimiters applies user, tenant and other rules sequentially. It stops at
+the first denial and returns the decisions and denied rule index. Earlier
+successful rules remain charged. It does not implement an atomic transaction
+across policies or separate stores.
+
+FAILURE CONTROL AND OBSERVABILITY
+
+The circuit breaker opens after consecutive backend failures, waits through a
+cooldown and permits one recovery probe. A successful probe closes it. Old
+in-flight successes cannot close a newly opened circuit. It is process-local
+and does not create a shared fallback store.
+
+check accepts an AbortSignal and timeoutMs. A signal aborted before execution
+consumes nothing. Once storage work is sent, stopping caller waiting cannot
+guarantee undoing a committed decision. Do not blindly retry ambiguous checks.
+
+stats reports local checks, allows, denials, errors, hook failures and latency.
+onDecision/onError can feed the app's existing metrics system. Hooks do not
+block decisions; observer failures cannot reverse already consumed capacity.
+Avoid subject IDs in metric labels because of privacy and excessive cardinality.
+There is no built-in monitoring server or author-hosted dashboard.
+
+BUILD AND DISTRIBUTION
+
+ESM users import the default function. CommonJS users require a callable function.
+Both Node entry points use the same shared implementation, preserving error
+class identities. The build generates matching ESM and CommonJS declarations.
+The core entry point bundles without Node built-ins for compatible edge tooling.
+It excludes the Node Redis/PostgreSQL adapters; distributed edge deployments
+still need a compatible atomic shared store.
+
+The npm tarball includes compiled distribution, types, maps, SQL migrations,
+documentation and license. Development tests, .git, local credentials and
+node_modules are excluded. Prepack rebuilds the distribution before packing.
+
+TESTING AND AN INTERVIEW DEMO
+
+Run npm ci, npm run build and npm run check from the project folder.
+Native tests need disposable TEST_DATABASE_URL and TEST_REDIS_URL settings.
+Without them native database tests explicitly skip. Embedded SQL/Lua checks
+are useful local validation but do not establish native server/network behaviour.
+GitHub Actions supplies real Redis and PostgreSQL for the native contract tests.
+
+Run node examples/express.js. In a second terminal request
+http://127.0.0.1:3000/api/demo six times together. The initial five requests pass
+and the sixth returns 429. Continuous refill may permit delayed requests later.
+Read http://127.0.0.1:3000/metrics to see local decisions. Ctrl+C stops the demo.
+
+Tests cover weighted costs, expiry, backward time, bursts, configuration changes,
+capacity bounds, concurrent checks, observer failures, timeouts, circuit recovery,
+framework responses, migration upgrades, imports, types and browser/edge bundling.
+
+PRINCIPLES USED
+
+Separation of concerns: algorithms, storage and HTTP integration have separate
+files and responsibilities. Dependency injection: apps supply stores and clients.
+Atomicity: one decision cannot race another subject decision. Per-subject locking:
+unrelated users do not share one global PostgreSQL lock. Bounded state: explicit
+limits prevent unchecked process memory growth. Fail-closed defaults: outages
+cannot silently grant unlimited work. Explicit policy versioning: incompatible
+settings cannot reuse state unnoticed. Observer isolation: monitoring outages do
+not affect completed quotas. Backward compatibility: original algorithm/API
+defaults and legacy headers remain. Shared distribution implementation: import
+and require avoid duplicate Node error classes. Honest performance reporting:
+configuration ceilings and local benchmarks are not production throughput SLAs.
+
+WHAT STILL DEPENDS ON USERS OR HAS TRADE-OFFS
+
+Exact event history remains expensive. Memory remains process-local. Redis
+eviction/restarts/failover can lose state according to its configuration.
+Multi-region global limits require one consistent coordination store and incur
+network latency. Independent regions have independent quotas. Very hot subjects
+serialize. Counter windows are approximate. Composed quotas do not roll back.
+Timeouts can leave committed checks. Refunds, reservations and idempotency keys
+are not included. PostgreSQL time partitioning is not applied automatically.
+No package can promise one universal maximum throughput regardless of hardware,
+databases, network and workload.
+
+NPM PUBLICATION
+
+This upgrade prepares 0.2.0 locally. It does not publish automatically. Before
+publishing, confirm the version is unused, native CI passed and the actual tarball
+works in a fresh consumer. Follow RELEASING.md. Users provide their own servers
+and database bills; the author's job is maintaining library releases and docs.
+
+40 INTERVIEW QUESTIONS
+
+1. What problem does ThrottlFlow solve?
+2. Why convert the original website into an npm package?
+3. How does a consuming app integrate the package?
+4. Why use JavaScript runtime code and TypeScript declarations?
+5. What happens during one check from input to response?
+6. What fields does a decision contain?
+7. What is the difference between a denial and a storage failure?
+8. How does an exact sliding window work?
+9. Why do weighted requests need cumulative expiration calculation?
+10. What is a token bucket and what does its capacity mean?
+11. Why can a token bucket allow more than capacity over a minute?
+12. What does GCRA track and why is its state small?
+13. How does the approximate counter differ from an exact window?
+14. Which algorithm would you choose for login versus public API traffic?
+15. Why is memory unsuitable for a global multi-instance quota?
+16. How are memory keys/events bounded without quota-bypassing eviction?
+17. What is the concurrency race when one token remains?
+18. Why is a PostgreSQL transaction alone insufficient?
+19. How does SELECT FOR UPDATE coordinate application instances?
+20. Why lock per subject rather than one global row?
+21. How does Redis Lua guarantee an atomic decision?
+22. Why use database/server time instead of application server clocks?
+23. What are Redis hash tags and why do related keys share one?
+24. Why cache scripts using EVALSHA, and when is fallback safe?
+25. Why are subject identifiers hashed, and why is hashing not encryption?
+26. How are schemas upgraded from the original release?
+27. Why run migrations during deployment instead of every request?
+28. What does scheduled PostgreSQL cleanup do?
+29. How does SKIP LOCKED help cleanup coexist with decisions?
+30. What happens when quota storage fails?
+31. When might fail-open behaviour be acceptable?
+32. How does the storage circuit breaker recover safely?
+33. Why can't abort/timeout always undo a quota consumption?
+34. How do weighted costs protect expensive endpoints?
+35. How are free/pro plans selected without creating unbounded policies?
+36. What happens if a later composed policy denies a request?
+37. How are metrics hooks isolated from quota correctness?
+38. How do import/require share one Node implementation?
+39. What do embedded tests prove, and what needs native database tests?
+40. How would you demonstrate the package and describe remaining limits honestly?
+
+For complete examples and operational details, read GUIDE.md and README.md.

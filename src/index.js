@@ -1,3 +1,4 @@
-export { default } from './factory.js';
-export { postgresStore, postgresSchema } from './postgres.js';
-export { ThrottlCapacityError, ThrottlConfigurationError, ThrottlStoreError } from './errors.js';
+export { default } from './core.js';
+export * from './core.js';
+export { postgresStore, postgresSchema, postgresMigrations } from './postgres.js';
+export { redisStore } from './redis.js';

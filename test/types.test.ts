@@ -1,6 +1,10 @@
 import { Pool } from 'pg';
 import type { Request, Response, NextFunction } from 'express';
-import throttl, { postgresStore, type ThrottlDecision } from 'throttlflow';
+import throttl, { postgresStore, redisStore, memoryStore, dynamicLimiter, composeLimiters, fastifyHook,
+  fetchHandler, type ThrottlDecision } from 'throttlflow';
+import { createClient } from 'redis';
+import Fastify from 'fastify';
+import type { FastifyRequest } from 'fastify';
 
 const local = throttl({ limit: 10, windowMs: 60_000 });
 const localDecision: Promise<ThrottlDecision> = local.check('customer-1');
@@ -19,6 +23,15 @@ const shared = postgresStore({ pool, namespace: 'login-v1' });
 const distributed = throttl({ limit: 5, windowMs: 60_000, store: shared });
 void distributed.check('customer-1');
 void shared.migrate();
+void redisStore({ client: createClient(), namespace: 'api' });
+void local.check('u', { cost: 2, signal: new AbortController().signal, timeoutMs: 1000 });
+void throttl({ algorithm: 'gcra', limit: 100, windowMs: 60000, burst: 10, store: memoryStore() });
+void throttl({ algorithm: 'sliding-window-counter', limit: 100, windowMs: 60000 });
+void dynamicLimiter<{ id: string }>({ resolve: user => ({ id: 'free-v1', key: user.id, options: { limit: 10, windowMs: 1000 } }) });
+void composeLimiters([{ limiter: local, key: (context: { id: string }) => context.id }]);
+const fastify = Fastify();
+fastify.addHook('onRequest', fastifyHook<FastifyRequest>(local, { key: request => request.ip }));
+void fetchHandler(local, { key: request => request.url }, (request, context: { id: string }) => Response.json(context));
 
 const middleware = local.middleware<{ user: { id: string } }>({
   key: (request) => request.user.id,

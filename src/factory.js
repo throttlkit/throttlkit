@@ -1,149 +1,122 @@
 import { ThrottlCapacityError, ThrottlConfigurationError, ThrottlStoreError } from './errors.js';
 import { memoryStore } from './memory.js';
+import { controlled } from './control.js';
+import { expressMiddleware } from './adapters.js';
 
-const DEFAULT_MAX_KEYS = 100_000;
-const DEFAULT_MAX_EVENTS = 1_000_000;
-const MAX_SLIDING_WINDOW_LIMIT = 10_000;
-const MAX_DURATION_MS = 365 * 24 * 60 * 60 * 1_000;
-
-function positiveInteger(value, name) {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new TypeError(`${name} must be a positive integer`);
+// Validates bounded numeric settings before a limiter can consume any capacity.
+function positive(value, name, integer = true) {
+  if (!Number.isFinite(value) || value <= 0 || (integer && !Number.isSafeInteger(value))) {
+    throw new TypeError(`${name} must be a positive ${integer ? 'integer' : 'finite number'}`);
   }
   return value;
 }
 
-function positiveNumber(value, name) {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    throw new TypeError(`${name} must be a positive finite number`);
-  }
-  return value;
-}
-
+// Restricts intervals to one year so expiration and retry timestamps remain usable.
 function duration(value, name) {
-  const result = positiveInteger(value, name);
-  if (result > MAX_DURATION_MS) {
-    throw new RangeError(`${name} must not exceed one year`);
-  }
-  return result;
+  positive(value, name);
+  if (value > 31_536_000_000) throw new RangeError(`${name} must not exceed one year`);
+  return value;
 }
 
-function normalizeOptions(options) {
-  if (!options || typeof options !== 'object' || Array.isArray(options)) {
-    throw new TypeError('Throttl options must be an object');
+// Normalizes algorithm options while preserving the original sliding-window default.
+export function normalizeOptions(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new TypeError('Throttl options must be an object');
+  const algorithm = raw.algorithm ?? 'sliding-window';
+  if (!['sliding-window', 'sliding-window-counter', 'token-bucket', 'gcra'].includes(algorithm)) throw new TypeError('Invalid algorithm');
+  const options = { ...raw, algorithm,
+    maxKeys: positive(raw.maxKeys ?? 100_000, 'maxKeys'),
+    maxEvents: positive(raw.maxEvents ?? 1_000_000, 'maxEvents'), clock: raw.clock ?? Date.now };
+  if (typeof options.clock !== 'function') throw new TypeError('clock must be a function');
+  if (raw.store && (typeof raw.store.check !== 'function' || typeof raw.store.reset !== 'function')) throw new TypeError('store must expose check and reset');
+  for (const name of ['onDecision', 'onError', 'onHookError']) {
+    if (raw[name] !== undefined && typeof raw[name] !== 'function') throw new TypeError(`${name} must be a function`);
   }
-  const algorithm = options.algorithm ?? 'sliding-window';
-  if (algorithm !== 'sliding-window' && algorithm !== 'token-bucket') {
-    throw new TypeError('algorithm must be sliding-window or token-bucket');
-  }
-  const maxKeys = positiveInteger(options.maxKeys ?? DEFAULT_MAX_KEYS, 'maxKeys');
-  const maxEvents = positiveInteger(options.maxEvents ?? DEFAULT_MAX_EVENTS, 'maxEvents');
-  const clock = options.clock ?? Date.now;
-  if (typeof clock !== 'function') throw new TypeError('clock must be a function');
-  if (options.store && (typeof options.store.check !== 'function'
-    || typeof options.store.reset !== 'function')) {
-    throw new TypeError('store must expose check(key, options) and reset(key)');
-  }
-
-  if (algorithm === 'sliding-window') {
-    const limit = positiveInteger(options.limit, 'limit');
-    if (limit > MAX_SLIDING_WINDOW_LIMIT) {
-      throw new RangeError(`limit must not exceed ${MAX_SLIDING_WINDOW_LIMIT} for sliding-window`);
+  if (raw.timeoutMs !== undefined) duration(raw.timeoutMs, 'timeoutMs');
+  if (algorithm === 'token-bucket') {
+    positive(raw.capacity, 'capacity'); positive(raw.refillRate, 'refillRate', false);
+    duration(raw.refillIntervalMs, 'refillIntervalMs');
+    if (raw.capacity * raw.refillIntervalMs / raw.refillRate > 31_536_000_000) throw new RangeError('A full refill must not exceed one year');
+  } else {
+    positive(raw.limit, 'limit'); duration(raw.windowMs, 'windowMs');
+    if (algorithm === 'sliding-window') {
+      options.maxSlidingWindowLimit = positive(raw.maxSlidingWindowLimit ?? 10_000, 'maxSlidingWindowLimit');
+      if (raw.limit > options.maxSlidingWindowLimit) throw new RangeError(`limit must not exceed ${options.maxSlidingWindowLimit} for sliding-window`);
     }
-    return {
-      algorithm,
-      limit,
-      windowMs: duration(options.windowMs, 'windowMs'),
-      maxKeys,
-      maxEvents,
-      clock,
-      store: options.store,
-    };
+    if (algorithm === 'gcra') {
+      options.burst = positive(raw.burst ?? 1, 'burst');
+      if (options.burst * raw.windowMs / raw.limit > 31_536_000_000) throw new RangeError('Burst recovery must not exceed one year');
+      if (raw.limit > raw.windowMs * 1000) throw new RangeError('GCRA supports at most one configured unit per microsecond');
+      if (!Number.isSafeInteger(options.burst * Math.ceil(raw.windowMs * 1000 / raw.limit))) throw new RangeError('GCRA burst schedule exceeds safe integer precision');
+    }
   }
-
-  const capacity = positiveInteger(options.capacity, 'capacity');
-  const refillRate = positiveNumber(options.refillRate, 'refillRate');
-  const refillIntervalMs = duration(options.refillIntervalMs, 'refillIntervalMs');
-  if (capacity * refillIntervalMs / refillRate > MAX_DURATION_MS) {
-    throw new RangeError('A full token-bucket refill must not take more than one year');
-  }
-  return {
-    algorithm,
-    capacity,
-    refillRate,
-    refillIntervalMs,
-    maxKeys,
-    maxEvents,
-    clock,
-    store: options.store,
-  };
+  return Object.freeze(options);
 }
 
-function validateKey(key) {
-  if (typeof key !== 'string' || key.length === 0 || key.length > 512) {
-    throw new TypeError('Rate-limit key must be a non-empty string of at most 512 characters');
-  }
+// Rejects empty or unbounded identifiers before they reach a store.
+export function validateKey(key) {
+  if (typeof key !== 'string' || key.length === 0 || key.length > 512) throw new TypeError('Rate-limit key must be a non-empty string of at most 512 characters');
   return key;
 }
 
-function setHeaders(response, decision) {
-  response.setHeader('X-RateLimit-Limit', String(decision.limit));
-  response.setHeader('X-RateLimit-Remaining', String(decision.remaining));
-  response.setHeader('X-RateLimit-Reset', String(Math.ceil(decision.resetAt.getTime() / 1_000)));
-  if (!decision.allowed) {
-    response.setHeader('Retry-After', String(Math.max(1, Math.ceil(decision.retryAfterMs / 1_000))));
-  }
-}
-
-// Creates a limiter whose decisions come from memory or a supplied shared store.
+// Creates a weighted limiter with bounded waiting and lightweight local metrics.
 export default function throttl(rawOptions) {
   const options = normalizeOptions(rawOptions);
   const store = options.store ?? memoryStore(options);
+  const metrics = { checks: 0, allowed: 0, denied: 0, errors: 0, hookErrors: 0, durationMs: 0 };
 
-  async function check(key) {
-    validateKey(key);
-    try {
-      return await store.check(key, options);
-    } catch (error) {
-      if (error instanceof ThrottlCapacityError
-        || error instanceof ThrottlConfigurationError
-        || error instanceof ThrottlStoreError) throw error;
-      throw new ThrottlStoreError('Rate-limit store failed', { cause: error });
-    }
-  }
-
-  async function reset(key) {
-    validateKey(key);
-    return store.reset(key);
-  }
-
-  async function cleanup() {
-    return typeof store.cleanup === 'function' ? store.cleanup() : 0;
-  }
-
-  function middleware({ key } = {}) {
-    if (typeof key !== 'function') {
-      throw new TypeError('middleware requires a key(request) function');
-    }
-    return async (request, response, next) => {
-      let subject;
-      try { subject = key(request); }
-      catch (error) { next(error); return; }
-
-      try {
-        const result = await check(subject);
-        setHeaders(response, result);
-        if (result.allowed) next();
-        else response.status(429).json({ error: 'RATE_LIMITED', retryAfterMs: result.retryAfterMs });
-      } catch (error) {
-        if (error instanceof ThrottlCapacityError || error instanceof ThrottlStoreError) {
-          response.status(503).json({ error: 'RATE_LIMIT_UNAVAILABLE' });
-        } else {
-          next(error);
-        }
+  // Observes activity without making an observer failure change a completed decision.
+  function notify(name, event) {
+    if (!options[name]) return;
+    const failed = error => {
+      metrics.hookErrors++;
+      if (name !== 'onHookError' && options.onHookError) {
+        try { Promise.resolve(options.onHookError(error)).catch(() => {}); } catch {}
       }
     };
+    try { Promise.resolve(options[name](event)).catch(failed); } catch (error) { failed(error); }
   }
 
-  return { check, reset, cleanup, middleware };
+  // Consumes a configurable number of quota units for one subject.
+  async function check(key, checkOptions = {}) {
+    validateKey(key);
+    const cost = positive(checkOptions.cost ?? 1, 'cost');
+    const capacity = options.algorithm === 'token-bucket' ? options.capacity
+      : options.algorithm === 'gcra' ? options.burst : options.limit;
+    if (cost > capacity) throw new RangeError('cost must not exceed the policy capacity');
+    if (cost > 1 && store.supportsCost !== true) throw new ThrottlConfigurationError('Custom store must declare supportsCost: true for weighted checks');
+    const timeoutMs = checkOptions.timeoutMs ?? options.timeoutMs;
+    if (timeoutMs !== undefined) duration(timeoutMs, 'timeoutMs');
+    checkOptions.signal?.throwIfAborted();
+    const start = performance.now();
+    metrics.checks++;
+    try {
+      const result = await controlled(() => store.check(key, options, { ...checkOptions, cost }), { signal: checkOptions.signal, timeoutMs });
+      if (!result || typeof result.allowed !== 'boolean' || !Number.isFinite(result.remaining)
+        || result.remaining < 0 || !Number.isFinite(result.limit) || result.limit < 1
+        || !(result.resetAt instanceof Date) || !Number.isFinite(result.resetAt.getTime())
+        || !Number.isFinite(result.retryAfterMs) || result.retryAfterMs < 0) throw new ThrottlStoreError('Store returned an invalid decision');
+      const durationMs = performance.now() - start;
+      metrics[result.allowed ? 'allowed' : 'denied']++; metrics.durationMs += durationMs;
+      notify('onDecision', { key, cost, algorithm: options.algorithm, decision: result, durationMs });
+      return result;
+    } catch (error) {
+      metrics.errors++; metrics.durationMs += performance.now() - start;
+      const failure = error instanceof ThrottlCapacityError || error instanceof ThrottlConfigurationError
+        || error instanceof ThrottlStoreError || checkOptions.signal?.aborted ? error
+        : new ThrottlStoreError('Rate-limit store failed', { cause: error });
+      notify('onError', { key, cost, error: failure });
+      throw failure;
+    }
+  }
+
+  // Clears one subject without affecting other quotas.
+  async function reset(key) { return store.reset(validateKey(key)); }
+  // Runs store-specific expiration maintenance.
+  async function cleanup() { return typeof store.cleanup === 'function' ? store.cleanup() : 0; }
+  // Reports per-instance counters for application metrics collection.
+  function stats() { return { ...metrics, averageDurationMs: metrics.checks ? metrics.durationMs / metrics.checks : 0 }; }
+  const limiter = { check, reset, cleanup, stats, store };
+  // Creates Express middleware with a trusted identity extractor.
+  limiter.middleware = adapterOptions => expressMiddleware(limiter, adapterOptions);
+  return limiter;
 }

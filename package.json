@@ -1,7 +1,7 @@
 {
   "name": "throttlflow",
-  "version": "0.1.0",
-  "description": "In-process and PostgreSQL-backed rate limiting for Node.js",
+  "version": "0.2.0",
+  "description": "Weighted rate limiting with memory, Redis and PostgreSQL stores for Node.js",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,29 +14,56 @@
     "throttle",
     "sliding-window",
     "token-bucket",
-    "postgresql"
+    "postgresql",
+    "redis",
+    "gcra",
+    "middleware"
   ],
   "type": "module",
-  "main": "./src/index.js",
-  "types": "./src/index.d.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.d.ts",
-      "default": "./src/index.js"
-    }
+      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
+    },
+    "./core": {
+      "node": {
+        "import": { "types": "./dist/core.d.ts", "default": "./dist/core-node.js" },
+        "require": { "types": "./dist/core.d.cts", "default": "./dist/core-node.cjs" }
+      },
+      "import": { "types": "./dist/core.d.ts", "default": "./dist/portable.js" },
+      "require": { "types": "./dist/core.d.cts", "default": "./dist/portable.cjs" }
+    },
+    "./migrations/*": "./migrations/*"
   },
   "files": [
-    "src/",
+    "dist/",
+    "migrations/",
+    "GUIDE.md",
+    "aboutme.txt",
+    "CHANGELOG.md",
+    "RELEASING.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "examples/",
     "README.md",
     "BENCHMARK.md",
     "benchmark.js",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/throttle.test.js test/express.test.js",
-    "benchmark": "node --expose-gc benchmark.js",
+    "build": "node scripts/build.js",
+    "prepack": "npm run build",
+    "test": "node --test test/throttle.test.js test/express.test.js test/features.test.js test/adapters.test.js test/circuit.test.js",
+    "test:package": "npm run build && node --test test/package.test.js",
+    "test:embedded": "node --test test/embedded-stores.test.js",
+    "benchmark": "npm run build && node --expose-gc benchmark.js",
+    "benchmark:stores": "node scripts/benchmark-stores.js",
     "test:types": "tsc --noEmit --project test/tsconfig.json",
-    "test:integration": "node --test test/postgres.test.js"
+    "test:integration": "node --test test/postgres.test.js test/stores.test.js",
+    "check": "npm test && npm run test:package && npm run test:types && npm run test:embedded && npm run test:integration"
   },
   "peerDependencies": {
     "pg": "^8.0.0"
@@ -49,10 +76,17 @@
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/pg": "^8.23.1",
+    "@types/node": "^22.0.0",
     "express": "^5.1.0",
     "pg": "^8.16.3",
     "supertest": "^7.1.4",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "esbuild": "^0.25.0",
+    "redis": "^5.0.0",
+    "fastify": "^5.0.0",
+    "koa": "^3.0.0",
+    "@electric-sql/pglite": "^0.3.0",
+    "fengari": "^0.1.4"
   },
   "engines": {
     "node": ">=22"

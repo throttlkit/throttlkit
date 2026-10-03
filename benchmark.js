@@ -1,6 +1,6 @@
 import os from 'node:os';
 import { performance } from 'node:perf_hooks';
-import throttl from './src/index.js';
+import throttl from 'throttlflow';
 
 const sizes = [1_000, 5_000, 10_000];
 const repetitions = 3;

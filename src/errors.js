@@ -18,3 +18,10 @@ export class ThrottlConfigurationError extends Error {
     this.name = 'ThrottlConfigurationError';
   }
 }
+
+export class ThrottlTimeoutError extends ThrottlStoreError {
+  constructor(message = 'Rate-limit operation timed out') {
+    super(message);
+    this.name = 'ThrottlTimeoutError';
+  }
+}
